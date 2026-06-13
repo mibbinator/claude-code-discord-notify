@@ -2,7 +2,7 @@
 
 This guide sets up Claude Code so it **sends you a Discord message (with a real ping/notification)** whenever it:
 
-- 🔔 **needs your input** — a permission prompt, a question, or an MCP elicitation. Detected via the `Notification` event gated on its `notification_type`, so it fires **only** when Claude is actually blocked on you — not on every turn-end or idle. (There is intentionally **no `Stop` hook** — see Step D.)
+- 🔔 **needs your input** — a permission prompt, a question, an MCP elicitation, or Claude finishing/stuck and waiting for you (the ~60s idle signal). Detected via the `Notification` event gated on its `notification_type`, so it fires when Claude needs you — not on every routine turn-end. (There is intentionally **no `Stop` hook** — see Step D.)
 
 It works by using **Claude Code hooks** (commands Claude runs automatically at certain points) plus a **Discord webhook** (a "post into this channel" URL). No bot, no token, no server to host.
 
@@ -141,7 +141,7 @@ Your settings file is `~/.claude/settings.json`. **If it already exists, merge**
   "hooks": {
     "Notification": [
       {
-        "matcher": "permission_prompt|worker_permission_prompt|elicitation_dialog|elicitation_url_dialog",
+        "matcher": "permission_prompt|worker_permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog",
         "hooks": [
           {
             "type": "command",
@@ -251,7 +251,7 @@ Your settings file is `%USERPROFILE%\.claude\settings.json`. **If it already exi
   "hooks": {
     "Notification": [
       {
-        "matcher": "permission_prompt|worker_permission_prompt|elicitation_dialog|elicitation_url_dialog",
+        "matcher": "permission_prompt|worker_permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog",
         "hooks": [
           {
             "type": "command",
@@ -323,7 +323,7 @@ Settings layer **user → project → local**, but hooks **don't override each o
 ## Customizing
 
 - **Edit the wording / emoji:** change the `$content` / `CONTENT` lines in the script.
-- **Add a ~60s "your turn" idle nudge:** the default pings only on hard blocks. To *also* be pinged after ~60s idle, add `idle_prompt` to the `Notification` matcher **and** the script allowlist; tune the delay via `messageIdleNotifThresholdMs` in `settings.json` (default `60000`).
+- **Quieter (hard blocks only):** to skip the ~60s idle "your turn" signal and ping only for permission prompts / questions / elicitation, remove `idle_prompt` from the `Notification` matcher **and** the script allowlist. Tune the idle delay via `messageIdleNotifThresholdMs` in `settings.json` (default `60000`).
 - **Turn everything off temporarily:** in `settings.json` set `"disableAllHooks": true`, or just delete the `"hooks"` block.
 - **Rotate your webhook:** if the URL ever leaks, delete the webhook in Discord, make a new one, and overwrite `~/.claude/discord_webhook.txt`. No other changes needed.
 

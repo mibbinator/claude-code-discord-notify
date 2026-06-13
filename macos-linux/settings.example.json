@@ -1,8 +1,8 @@
 {
-  "_comment": "Merge the hooks block below into ~/.claude/settings.json. Replace YOUR_DISCORD_USER_ID with your numeric Discord user ID (or remove ' YOUR_DISCORD_USER_ID' from a hook to post without pinging). The activity hooks need no user ID (that feed never pings). Requires bash, curl, and jq on the machine. The Notification matcher whitelists only the notification_type values that mean Claude needs you (tool/permission prompts -- which also cover AskUserQuestion and plan-mode -- and MCP elicitation dialogs); there is intentionally NO Stop hook (turn-end is not a needs-input signal). To also get a ~60s 'your turn' idle nudge, add idle_prompt to the matcher.",
+  "_comment": "Merge the hooks block below into ~/.claude/settings.json. Replace YOUR_DISCORD_USER_ID with your numeric Discord user ID (or remove ' YOUR_DISCORD_USER_ID' from a hook to post without pinging). The activity hooks need no user ID (that feed never pings). Requires bash, curl, and jq on the machine. The Notification matcher whitelists the notification_type values that mean Claude needs you: tool/permission prompts (which also cover AskUserQuestion and plan-mode), MCP elicitation dialogs, and idle_prompt (the ~60s 'waiting for your input' signal for when Claude is finished/stuck and it's your turn). There is intentionally NO Stop hook (turn-end is not a needs-input signal). For hard-blocks-only, remove idle_prompt.",
   "hooks": {
     "Notification": [
-      { "matcher": "permission_prompt|worker_permission_prompt|elicitation_dialog|elicitation_url_dialog", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/notify-discord.sh\" Notification YOUR_DISCORD_USER_ID", "async": true } ] }
+      { "matcher": "permission_prompt|worker_permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/notify-discord.sh\" Notification YOUR_DISCORD_USER_ID", "async": true } ] }
     ],
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/notify-discord-activity.sh\" UserPrompt", "async": true } ] }

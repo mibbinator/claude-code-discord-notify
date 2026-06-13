@@ -2,7 +2,7 @@
 
 Get **Discord notifications** from [Claude Code](https://claude.com/claude-code) using hooks + webhooks — no bot, no token, no server to host. Two independent feeds:
 
-- 🔔 **Ping feed** — pings you (real @-mention) **only when Claude actually needs your input** — a permission prompt, a question, or an MCP elicitation (gated on `notification_type`, so no turn-end / idle / phase / workflow spam). The embed shows your **official usage** (5-hour + weekly %, straight from the same endpoint `/usage` uses) and the token cost of the last prompt.
+- 🔔 **Ping feed** — pings you (real @-mention) **only when Claude actually needs your input** — a permission prompt, a question, an MCP elicitation, or Claude going idle/stuck and waiting for your reply (the ~60s idle signal). Gated on `notification_type`, so it skips routine turn-ends and informational notices. The embed shows your **official usage** (5-hour + weekly %, straight from the same endpoint `/usage` uses) and the token cost of the last prompt.
 - 📋 **Activity feed** — a separate, **no-ping** channel that streams what's happening: your prompts, subagents starting/finishing (task → model → tools used → result), `ultracode` workflow results, and Claude's messages — each tagged with the project directory, model, effort, and a timestamp.
 
 Two implementations with the same behavior:
@@ -87,7 +87,8 @@ This is an **undocumented internal endpoint** and may change between Claude Code
 ---
 
 ## Customizing
-- **Add a "your turn" idle nudge:** the default pings only on hard blocks (permission / question / elicitation). To *also* be pinged ~60s after Claude finishes and you haven't replied, add `idle_prompt` to the `Notification` `matcher` **and** the script allowlist (tune the delay via `messageIdleNotifThresholdMs` in `settings.json`, default `60000`). Note: with subagents/background workflows this can ping ~60s into a run if the main thread idles.
+- **Quieter (hard blocks only):** to ping *only* for permission prompts / questions / elicitation and skip the ~60s idle "your turn" signal, remove `idle_prompt` from the `Notification` `matcher` **and** the script allowlist.
+- **Tune the idle delay:** `idle_prompt` fires after ~60s idle; set `messageIdleNotifThresholdMs` in `settings.json` (default `60000`). Heads-up: it tracks main-thread idle, so a long background workflow can trigger it ~60s in.
 - **Only the ping feed:** omit the activity hooks (`UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PostToolUse`, `MessageDisplay`).
 - **Everything in one channel:** point both webhook files at the same URL.
 
