@@ -72,7 +72,7 @@ echo '{"message":"setup test"}' | bash ~/.claude/notify-discord.sh Notification 
 | `PostToolUse` (`Workflow`) | ⚙ Workflow finished | consolidated workflow result |
 | `MessageDisplay` | 🤖 Claude | the assistant's reply text · model · effort |
 
-Every embed carries the **project directory** (author line) and a **dated timestamp** (footer).
+Every embed carries the **project directory** (author line) and a footer with a **dated timestamp** and your live **5-hour usage %** (cached ~60s in `~/.claude/discord_usage_cache.json` so the high-frequency feed doesn't call the usage API on every event).
 
 ---
 

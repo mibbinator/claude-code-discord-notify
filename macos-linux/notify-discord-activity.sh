@@ -43,6 +43,32 @@ find_agent_tx() { # $1 main transcript_path, $2 agent_id
   local base; base="$(norm "$1")"; base="${base%.jsonl}"
   [ -n "$2" ] && [ -d "$base/subagents" ] && find "$base/subagents" -name "agent-$2.jsonl" 2>/dev/null | head -n 1 || true
 }
+# Official 5-hour usage %, cached ~60s so the high-frequency activity feed does
+# not hit api.anthropic.com on every event. Echoes the integer percent, or ''.
+get_usage_pct() {
+  local cache="$CLAUDE_DIR/discord_usage_cache.json" now ts token cred resp pct
+  now=$(date -u +%s)
+  if [ -f "$cache" ]; then
+    ts=$(jq -r '.ts // 0' "$cache" 2>/dev/null || echo 0)
+    if [ "${ts:-0}" -gt 0 ] && [ $((now - ts)) -lt 60 ]; then
+      jq -r '.pct // empty' "$cache" 2>/dev/null || true
+      return
+    fi
+  fi
+  cred="$CLAUDE_DIR/.credentials.json"; token=""
+  if [ -f "$cred" ]; then
+    token=$(jq -r '.claudeAiOauth.accessToken // empty' "$cred" 2>/dev/null || true)
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    token=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null || true)
+  fi
+  pct=""
+  if [ -n "$token" ]; then
+    resp=$(curl -sf -m 8 'https://api.anthropic.com/api/oauth/usage' -H "Authorization: Bearer $token" -H 'anthropic-beta: oauth-2025-04-20' -H 'anthropic-version: 2023-06-01' -H 'User-Agent: claude-discord-usage-hook' 2>/dev/null || true)
+    [ -n "$resp" ] && pct=$(printf '%s' "$resp" | jq -r 'if .five_hour.utilization != null then (.five_hour.utilization|round|tostring) else empty end' 2>/dev/null || true)
+  fi
+  jq -nc --argjson ts "$now" --arg pct "$pct" '{ts:$ts,pct:$pct}' > "$cache" 2>/dev/null || true
+  printf '%s' "$pct"
+}
 
 CWD="$(jget '.cwd')"
 DIR=""; [ -n "$CWD" ] && DIR="$(basename "$CWD")"
@@ -99,6 +125,8 @@ esac
 
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 DATESTR="$(date +"%a %b %d, %Y  %I:%M:%S %p")"
+PCT="$(get_usage_pct)"
+[ -n "$PCT" ] && DATESTR="$DATESTR  -  ${PCT}% of 5h"
 
 BODY="$(jq -n \
   --argjson color "$COLOR" --arg title "$TITLE" --arg desc "$DESC" \

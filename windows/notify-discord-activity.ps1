@@ -123,6 +123,33 @@ function Get-MainEffort {
     } catch { }
     return ''
 }
+# Official 5-hour usage %, cached ~60s so the high-frequency activity feed
+# (esp. MessageDisplay) doesn't hit api.anthropic.com on every event. Returns
+# '' on any failure (cached too, to avoid retry storms while the API is down).
+function Get-UsagePct {
+    $cacheFile = Join-Path $claudeDir 'discord_usage_cache.json'
+    try {
+        if (Test-Path $cacheFile) {
+            $c = Get-Content $cacheFile -Raw | ConvertFrom-Json
+            $age = ((Get-Date).ToUniversalTime() - ([datetimeoffset]::Parse($c.at)).UtcDateTime).TotalSeconds
+            if ($age -lt 60) { return "$($c.pct)" }
+        }
+    } catch { }
+    $pct = ''
+    try {
+        $oauth = $null
+        $credFile = Join-Path $claudeDir '.credentials.json'
+        if (Test-Path $credFile) { $oauth = (Get-Content $credFile -Raw | ConvertFrom-Json).claudeAiOauth }
+        elseif ($IsMacOS) { $j = & security find-generic-password -s 'Claude Code-credentials' -w 2>$null; if ($j) { $oauth = ($j | ConvertFrom-Json).claudeAiOauth } }
+        if ($oauth -and $oauth.accessToken) {
+            $h = @{ 'Authorization' = "Bearer $($oauth.accessToken)"; 'anthropic-beta' = 'oauth-2025-04-20'; 'anthropic-version' = '2023-06-01'; 'User-Agent' = 'claude-discord-usage-hook' }
+            $u = Invoke-RestMethod -Uri 'https://api.anthropic.com/api/oauth/usage' -Headers $h -Method Get -TimeoutSec 8
+            if ($u.five_hour) { $pct = "$([int][math]::Round([double]$u.five_hour.utilization))" }
+        }
+    } catch { $pct = '' }
+    try { @{ at = (Get-Date).ToUniversalTime().ToString('o'); pct = $pct } | ConvertTo-Json -Compress | Set-Content -Path $cacheFile -NoNewline -Encoding ascii } catch { }
+    return $pct
+}
 
 # Glyphs from code points (keeps this source ASCII-safe for PS 5.1).
 $gFolder = [System.Char]::ConvertFromUtf32(0x1F4C1)
@@ -205,7 +232,10 @@ if ($title) { $embed['title'] = $title }
 if ("$desc".Trim()) { $embed['description'] = $desc }
 if ($fields.Count) { $embed['fields'] = $fields }
 if ($dirLabel) { $embed['author'] = @{ name = "$gFolder  $dirLabel" } }
-$embed['footer'] = @{ text = (Get-Date).ToString('ddd MMM d, yyyy  h:mm:ss tt') }
+$footerText = (Get-Date).ToString('ddd MMM d, yyyy  h:mm:ss tt')
+$usagePct = Get-UsagePct
+if ($usagePct) { $footerText += "  -  $usagePct% of 5h" }
+$embed['footer'] = @{ text = $footerText }
 
 # allowed_mentions.parse = [] guarantees NO pings.
 $body = @{ embeds = @($embed); allowed_mentions = @{ parse = @() } }
