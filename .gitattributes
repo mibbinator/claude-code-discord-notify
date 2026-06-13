@@ -1,0 +1,6 @@
+# Keep shell scripts LF so they run on macOS/Linux regardless of clone settings.
+*.sh   text eol=lf
+# PowerShell is fine either way; CRLF is natural on Windows.
+*.ps1  text eol=crlf
+*.json text
+*.md   text
