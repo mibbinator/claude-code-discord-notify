@@ -6,7 +6,8 @@
 # distinguishes a normal scheduled rollover from a MANUAL reset Anthropic applies
 # to everyone early (detected when usage drops while the prior reset time is still
 # in the future). Reads the official /api/oauth/usage data (the same endpoint
-# /usage uses) and persists the last posted % + reset times between runs.
+# /usage uses), throttled to at most one API call per 5 min (cached), and
+# persists the last posted % + reset times between runs.
 # Cross-platform: Windows PowerShell 5.1 (Windows) and pwsh 7+ (macOS/Linux).
 # Usage (from a hook): notify-discord-usage.ps1 [discord_user_id]
 # Reads the hook's JSON payload on stdin (only used for the project name).
@@ -101,9 +102,36 @@ function Crossed-Milestone([int]$old, [int]$new) {
     return $false
 }
 
-# --- current usage ----------------------------------------------------------
-$usage = Get-RealUsage
-if (-not $usage) { exit 0 }   # can't tell what crossed -> do nothing
+# --- current usage (throttled: hit the API at most once per 5 min) ----------
+# PostToolUse fires on every tool, so an un-throttled fetch would call the usage
+# API dozens of times per turn (and can get rate-limited). Cache the last fetch
+# and reuse it within the TTL; crossings/resets are detected at up-to-5-min
+# granularity (multi-percent jumps between fetches are shown as "old% -> new%").
+$cacheFile = Join-Path $claudeDir 'discord_usage_throttle.json'
+$ttl = 300
+$now = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$usage = $null
+if (Test-Path $cacheFile) {
+    try {
+        $c = Get-Content $cacheFile -Raw | ConvertFrom-Json
+        if ($c.fetched_at -and (($now - [int]$c.fetched_at) -lt $ttl) -and $c.five_hour -and $c.seven_day) {
+            $usage = $c   # fresh enough -- reuse, no API call
+        }
+    } catch { }
+}
+if (-not $usage) {
+    $usage = Get-RealUsage
+    if ($usage) {
+        try {
+            @{
+                fetched_at = $now
+                five_hour  = @{ utilization = $usage.five_hour.utilization; resets_at = "$($usage.five_hour.resets_at)" }
+                seven_day  = @{ utilization = $usage.seven_day.utilization; resets_at = "$($usage.seven_day.resets_at)" }
+            } | ConvertTo-Json -Compress | Set-Content -Path $cacheFile -NoNewline -Encoding ascii
+        } catch { }
+    }
+}
+if (-not $usage) { exit 0 }   # API failed and no fresh cache -> do nothing
 $cur5 = [int][math]::Floor([double]$usage.five_hour.utilization)
 $cur7 = [int][math]::Floor([double]$usage.seven_day.utilization)
 

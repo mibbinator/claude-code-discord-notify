@@ -3,6 +3,7 @@ discord_webhook.txt
 discord_activity_webhook.txt
 discord_usage_webhook.txt
 discord_usage_pct_state.json
+discord_usage_throttle.json
 .credentials.json
 discord_notify_count.txt
 discord_window_anchor.txt

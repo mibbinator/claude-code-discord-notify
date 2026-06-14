@@ -7,7 +7,8 @@
 # distinguishes a normal scheduled rollover from a MANUAL reset Anthropic applies
 # to everyone early (detected when usage drops while the prior reset time is still
 # in the future). Reads the official /api/oauth/usage data (the same endpoint
-# /usage uses) and persists the last posted % + reset times between runs.
+# /usage uses), throttled to at most one API call per 5 min (cached), and
+# persists the last posted % + reset times between runs.
 # macOS / Linux version. Requires: bash, curl, jq.
 # Usage (from a hook): notify-discord-usage.sh [discord_user_id]
 # Reads the hook's JSON payload on stdin (only used for the project name).
@@ -38,15 +39,36 @@ get_token() {
       | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null
   fi
 }
+# Throttle: hit the usage API at most once per 5 min. PostToolUse fires on every
+# tool, so an un-throttled fetch would call the API dozens of times per turn (and
+# can get rate-limited). Reuse a cached fetch within the TTL; crossings/resets are
+# detected at up-to-5-min granularity.
+CACHE_FILE="$CLAUDE_DIR/discord_usage_throttle.json"
+TTL=300
+NOW="$(date +%s)"
 USAGE_JSON="null"
-TOKEN="$(get_token || true)"
-if [ -n "${TOKEN:-}" ]; then
-  resp="$(curl -sf -m 8 'https://api.anthropic.com/api/oauth/usage' \
-    -H "Authorization: Bearer $TOKEN" -H 'anthropic-beta: oauth-2025-04-20' \
-    -H 'anthropic-version: 2023-06-01' -H 'User-Agent: claude-discord-usage-hook' 2>/dev/null || true)"
-  if [ -n "$resp" ] && printf '%s' "$resp" | jq -e . >/dev/null 2>&1; then USAGE_JSON="$resp"; fi
+if [ -f "$CACHE_FILE" ]; then
+  FETCHED="$(jq -r '.fetched_at // 0' "$CACHE_FILE" 2>/dev/null || echo 0)"
+  if [ -n "$FETCHED" ] && [ $(( NOW - FETCHED )) -lt "$TTL" ] 2>/dev/null \
+     && jq -e '.five_hour and .seven_day' "$CACHE_FILE" >/dev/null 2>&1; then
+    USAGE_JSON="$(cat "$CACHE_FILE")"   # fresh enough -- reuse, no API call
+  fi
 fi
-[ "$USAGE_JSON" = "null" ] && exit 0   # can't tell what crossed -> do nothing
+if [ "$USAGE_JSON" = "null" ]; then
+  TOKEN="$(get_token || true)"
+  if [ -n "${TOKEN:-}" ]; then
+    resp="$(curl -sf -m 8 'https://api.anthropic.com/api/oauth/usage' \
+      -H "Authorization: Bearer $TOKEN" -H 'anthropic-beta: oauth-2025-04-20' \
+      -H 'anthropic-version: 2023-06-01' -H 'User-Agent: claude-discord-usage-hook' 2>/dev/null || true)"
+    if [ -n "$resp" ] && printf '%s' "$resp" | jq -e . >/dev/null 2>&1; then
+      USAGE_JSON="$resp"
+      printf '%s' "$resp" | jq --argjson now "$NOW" \
+        '{fetched_at:$now, five_hour:{utilization:.five_hour.utilization, resets_at:.five_hour.resets_at}, seven_day:{utilization:.seven_day.utilization, resets_at:.seven_day.resets_at}}' \
+        > "$CACHE_FILE" 2>/dev/null || true
+    fi
+  fi
+fi
+[ "$USAGE_JSON" = "null" ] && exit 0   # API failed and no fresh cache -> do nothing
 
 CUR5="$(printf '%s' "$USAGE_JSON" | jq -r '(.five_hour.utilization // 0) | floor')"
 CUR7="$(printf '%s' "$USAGE_JSON" | jq -r '(.seven_day.utilization // 0) | floor')"
