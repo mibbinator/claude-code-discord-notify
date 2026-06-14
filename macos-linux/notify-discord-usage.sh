@@ -47,28 +47,39 @@ CACHE_FILE="$CLAUDE_DIR/discord_usage_throttle.json"
 TTL=300
 NOW="$(date +%s)"
 USAGE_JSON="null"
+ATTEMPT_RECENT=0
 if [ -f "$CACHE_FILE" ]; then
   FETCHED="$(jq -r '.fetched_at // 0' "$CACHE_FILE" 2>/dev/null || echo 0)"
-  if [ -n "$FETCHED" ] && [ $(( NOW - FETCHED )) -lt "$TTL" ] 2>/dev/null \
-     && jq -e '.five_hour and .seven_day' "$CACHE_FILE" >/dev/null 2>&1; then
-    USAGE_JSON="$(cat "$CACHE_FILE")"   # fresh enough -- reuse, no API call
+  if [ -n "$FETCHED" ] && [ $(( NOW - FETCHED )) -lt "$TTL" ] 2>/dev/null; then
+    ATTEMPT_RECENT=1                                          # hit (or TRIED) the API < TTL ago
+    if jq -e '.five_hour and .seven_day' "$CACHE_FILE" >/dev/null 2>&1; then
+      USAGE_JSON="$(cat "$CACHE_FILE")"                       # ...and it succeeded -> reuse cache
+    fi
   fi
 fi
-if [ "$USAGE_JSON" = "null" ]; then
+# Only touch the API if our last ATTEMPT is older than the TTL -- this throttles
+# successes AND failures alike, so a rate-limit/outage never makes us hammer the
+# endpoint on every tool call. We record the attempt time either way.
+if [ "$USAGE_JSON" = "null" ] && [ "$ATTEMPT_RECENT" -eq 0 ]; then
   TOKEN="$(get_token || true)"
+  resp=""
   if [ -n "${TOKEN:-}" ]; then
     resp="$(curl -sf -m 8 'https://api.anthropic.com/api/oauth/usage' \
       -H "Authorization: Bearer $TOKEN" -H 'anthropic-beta: oauth-2025-04-20' \
       -H 'anthropic-version: 2023-06-01' -H 'User-Agent: claude-discord-usage-hook' 2>/dev/null || true)"
-    if [ -n "$resp" ] && printf '%s' "$resp" | jq -e . >/dev/null 2>&1; then
-      USAGE_JSON="$resp"
-      printf '%s' "$resp" | jq --argjson now "$NOW" \
-        '{fetched_at:$now, five_hour:{utilization:.five_hour.utilization, resets_at:.five_hour.resets_at}, seven_day:{utilization:.seven_day.utilization, resets_at:.seven_day.resets_at}}' \
-        > "$CACHE_FILE" 2>/dev/null || true
-    fi
+  fi
+  if [ -n "$resp" ] && printf '%s' "$resp" | jq -e . >/dev/null 2>&1; then
+    USAGE_JSON="$resp"
+    printf '%s' "$resp" | jq --argjson now "$NOW" \
+      '{fetched_at:$now, five_hour:{utilization:.five_hour.utilization, resets_at:.five_hour.resets_at}, seven_day:{utilization:.seven_day.utilization, resets_at:.seven_day.resets_at}}' \
+      > "$CACHE_FILE" 2>/dev/null || true
+  else
+    # Failed (or no creds): stamp the attempt so we back off for the full TTL
+    # instead of retrying on the very next tool call.
+    jq -n --argjson now "$NOW" '{fetched_at:$now}' > "$CACHE_FILE" 2>/dev/null || true
   fi
 fi
-[ "$USAGE_JSON" = "null" ] && exit 0   # API failed and no fresh cache -> do nothing
+[ "$USAGE_JSON" = "null" ] && exit 0   # no fresh data (failed, or backing off) -> do nothing
 
 CUR5="$(printf '%s' "$USAGE_JSON" | jq -r '(.five_hour.utilization // 0) | floor')"
 CUR7="$(printf '%s' "$USAGE_JSON" | jq -r '(.seven_day.utilization // 0) | floor')"

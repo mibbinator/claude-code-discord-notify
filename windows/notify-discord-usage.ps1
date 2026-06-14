@@ -111,17 +111,23 @@ $cacheFile = Join-Path $claudeDir 'discord_usage_throttle.json'
 $ttl = 300
 $now = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $usage = $null
+$attemptRecent = $false
 if (Test-Path $cacheFile) {
     try {
         $c = Get-Content $cacheFile -Raw | ConvertFrom-Json
-        if ($c.fetched_at -and (($now - [int]$c.fetched_at) -lt $ttl) -and $c.five_hour -and $c.seven_day) {
-            $usage = $c   # fresh enough -- reuse, no API call
+        if ($c.fetched_at -and (($now - [int]$c.fetched_at) -lt $ttl)) {
+            $attemptRecent = $true                                  # hit (or TRIED) the API < TTL ago
+            if ($c.five_hour -and $c.seven_day) { $usage = $c }     # ...and it succeeded -> reuse cache
         }
     } catch { }
 }
-if (-not $usage) {
-    $usage = Get-RealUsage
-    if ($usage) {
+# Only touch the API if our last ATTEMPT is older than the TTL -- this throttles
+# successes AND failures alike, so a rate-limit/outage never makes us hammer the
+# endpoint on every tool call. We record the attempt time either way.
+if (-not $usage -and -not $attemptRecent) {
+    $live = Get-RealUsage
+    if ($live) {
+        $usage = $live
         try {
             @{
                 fetched_at = $now
@@ -129,9 +135,13 @@ if (-not $usage) {
                 seven_day  = @{ utilization = $usage.seven_day.utilization; resets_at = "$($usage.seven_day.resets_at)" }
             } | ConvertTo-Json -Compress | Set-Content -Path $cacheFile -NoNewline -Encoding ascii
         } catch { }
+    } else {
+        # Failed (or no creds): stamp the attempt so we back off for the full TTL
+        # instead of retrying on the very next tool call.
+        try { @{ fetched_at = $now } | ConvertTo-Json -Compress | Set-Content -Path $cacheFile -NoNewline -Encoding ascii } catch { }
     }
 }
-if (-not $usage) { exit 0 }   # API failed and no fresh cache -> do nothing
+if (-not $usage) { exit 0 }   # no fresh data (failed, or backing off) -> do nothing
 $cur5 = [int][math]::Floor([double]$usage.five_hour.utilization)
 $cur7 = [int][math]::Floor([double]$usage.seven_day.utilization)
 
