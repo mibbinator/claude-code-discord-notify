@@ -1,8 +1,12 @@
 # notify-discord-usage.ps1 -- posts a Discord embed every time OFFICIAL usage
 # crosses to a new whole percent (~"every 1% used"), for the 5h + weekly windows.
 # Silent by default; @-mentions the user when a crossing passes a milestone
-# (25/50/80/90/100%) on EITHER window. Reads the official /api/oauth/usage data
-# (the same endpoint /usage uses) and persists the last posted % between runs.
+# (25/50/80/90/100%) on EITHER window. When a window RESETS it posts a separate,
+# highly-visible pinged message per window (5h and weekly independently), and
+# distinguishes a normal scheduled rollover from a MANUAL reset Anthropic applies
+# to everyone early (detected when usage drops while the prior reset time is still
+# in the future). Reads the official /api/oauth/usage data (the same endpoint
+# /usage uses) and persists the last posted % + reset times between runs.
 # Cross-platform: Windows PowerShell 5.1 (Windows) and pwsh 7+ (macOS/Linux).
 # Usage (from a hook): notify-discord-usage.ps1 [discord_user_id]
 # Reads the hook's JSON payload on stdin (only used for the project name).
@@ -105,29 +109,34 @@ $cur7 = [int][math]::Floor([double]$usage.seven_day.utilization)
 
 # --- last posted state ------------------------------------------------------
 $stateFile = Join-Path $claudeDir 'discord_usage_pct_state.json'
-$prev5 = -1; $prev7 = -1
+$prev5 = -1; $prev7 = -1; $prevR5 = ''; $prevR7 = ''
 if (Test-Path $stateFile) {
     try {
         $s = Get-Content $stateFile -Raw | ConvertFrom-Json
         if ($null -ne $s.five_hour) { $prev5 = [int]$s.five_hour }
         if ($null -ne $s.seven_day) { $prev7 = [int]$s.seven_day }
+        if ($s.five_hour_resets_at) { $prevR5 = "$($s.five_hour_resets_at)" }
+        if ($s.seven_day_resets_at) { $prevR7 = "$($s.seven_day_resets_at)" }
     } catch { }
 }
 
-# Crossing = a window advanced to a higher whole percent. A drop (window reset)
-# silently re-baselines. Persist the new floors regardless before deciding.
+# Crossing = a window advanced to a higher whole percent. A drop = that window
+# reset (each window accumulates monotonically, then resets to ~0 at its
+# boundary). Persist the new floors + reset times regardless before deciding.
 $crossed5 = ($prev5 -ge 0 -and $cur5 -gt $prev5)
 $crossed7 = ($prev7 -ge 0 -and $cur7 -gt $prev7)
-# A window resetting shows up as utilization dropping below the stored value:
-# each window accumulates monotonically, then resets to ~0 at its boundary.
 $reset5 = ($prev5 -ge 0 -and $cur5 -lt $prev5)
 $reset7 = ($prev7 -ge 0 -and $cur7 -lt $prev7)
 $isReset = ($reset5 -or $reset7)
 $firstRun = ($prev5 -lt 0 -and $prev7 -lt 0)
 
-# Always store the current floors so we don't drift / re-post.
 try {
-    $newState = @{ five_hour = $cur5; seven_day = $cur7 } | ConvertTo-Json -Compress
+    $newState = @{
+        five_hour           = $cur5
+        seven_day           = $cur7
+        five_hour_resets_at = "$($usage.five_hour.resets_at)"
+        seven_day_resets_at = "$($usage.seven_day.resets_at)"
+    } | ConvertTo-Json -Compress
     Set-Content -Path $stateFile -Value $newState -NoNewline -Encoding ascii
 } catch { }
 
@@ -136,66 +145,102 @@ try {
 if ($firstRun) { exit 0 }
 if (-not $isReset -and -not $crossed5 -and -not $crossed7) { exit 0 }
 
-# --- ping decision ----------------------------------------------------------
-# A limit reset always pings; a routine 1% crossing pings only at a milestone.
-$ping = $false
-if ($isReset) { $ping = $true }
-if ($crossed5 -and (Crossed-Milestone $prev5 $cur5)) { $ping = $true }
-if ($crossed7 -and (Crossed-Milestone $prev7 $cur7)) { $ping = $true }
-
-# --- compose embed + send ---------------------------------------------------
+# --- glyphs + helpers -------------------------------------------------------
 $folderGlyph = [System.Char]::ConvertFromUtf32(0x1F4C1)
 $chartGlyph  = [System.Char]::ConvertFromUtf32(0x1F4CA)
+$cycleGlyph  = [System.Char]::ConvertFromUtf32(0x1F504)
+$boltGlyph   = [System.Char]::ConvertFromUtf32(0x26A1)
+$greenGlyph  = [System.Char]::ConvertFromUtf32(0x1F7E2)
+$partyGlyph  = [System.Char]::ConvertFromUtf32(0x1F389)
 
 # Per-window display: show "old% -> new%" when it jumped more than one percent.
 function Win-Line([string]$label, [int]$old, [int]$new, [bool]$crossed) {
     if ($crossed -and ($new - $old) -gt 1) { return "**$old% $([char]0x2192) $new%**  $label" }
     return "**$new%**  $label"
 }
+# A reset is "manual" (Anthropic cleared the limit early for everyone) when the
+# previously-known reset time is still meaningfully in the future at the moment
+# usage drops; otherwise the window simply rolled over on schedule.
+function Reset-Kind([string]$prevIso) {
+    if (-not $prevIso) { return 'scheduled' }
+    try {
+        $rem = ([datetimeoffset]::Parse($prevIso)).UtcDateTime - (Get-Date).ToUniversalTime()
+        if ($rem.TotalSeconds -gt 300) { return 'manual' }
+    } catch { }
+    return 'scheduled'
+}
+function Send-Embed([string]$title, [string]$desc, [int]$color, $fields, [bool]$doPing) {
+    $embed = @{
+        color       = $color
+        author      = @{ name = "$folderGlyph  $projectName" }
+        title       = $title
+        description = $desc
+        footer      = @{ text = "$((Get-Date).ToString('ddd MMM d, yyyy  h:mm tt'))" }
+        timestamp   = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    if ($fields -and $fields.Count -gt 0) { $embed['fields'] = $fields }
+    $body = @{ embeds = @($embed) }
+    if ($doPing -and $UserId) {
+        $body['content'] = "<@$UserId>"
+        $body['allowed_mentions'] = @{ users = @("$UserId") }
+    } else {
+        $body['allowed_mentions'] = @{ parse = @() }
+    }
+    try {
+        $json = $body | ConvertTo-Json -Compress -Depth 10
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        Invoke-RestMethod -Uri $webhookUrl -Method Post -ContentType 'application/json; charset=utf-8' `
+            -Body $bytes -TimeoutSec 10 | Out-Null
+    } catch { }
+}
 
-$desc  = "$(Usage-Bar $cur5)  $(Win-Line 'used (5h window)' $prev5 $cur5 $crossed5)"
-$desc += "`n$(Usage-Bar $cur7)  $(Win-Line 'used (weekly)' $prev7 $cur7 $crossed7)"
+# --- resets: one separate, highly-visible message per window ----------------
+if ($reset5) {
+    $bar = Usage-Bar $cur5
+    if ((Reset-Kind $prevR5) -eq 'manual') {
+        $title = "$boltGlyph  ANTHROPIC RESET THE 5-HOUR LIMIT"
+        $desc  = "$partyGlyph **Anthropic just cleared the 5-hour limit early for everyone** -- you're back to **$cur5%** ahead of schedule!`n`n$bar  **$cur5%** used (5h window)"
+        $color = 16766720   # gold -- special / global event
+    } else {
+        $title = "$cycleGlyph  5-HOUR LIMIT RESET"
+        $desc  = "$greenGlyph Your **5-hour** window just rolled over -- back to **$cur5%**. Fresh window!`n`n$bar  **$cur5%** used (5h window)"
+        $color = 5763719    # bright green -- fresh window
+    }
+    $f = @(); $r = Reset-In $usage.five_hour.resets_at
+    if ($r) { $f += @{ name = 'Next 5h reset in'; value = $r; inline = $true } }
+    Send-Embed $title $desc $color $f $true
+}
+if ($reset7) {
+    $bar = Usage-Bar $cur7
+    if ((Reset-Kind $prevR7) -eq 'manual') {
+        $title = "$boltGlyph  ANTHROPIC RESET THE WEEKLY LIMIT"
+        $desc  = "$partyGlyph **Anthropic just cleared the weekly limit early for everyone** -- you're back to **$cur7%** ahead of schedule!`n`n$bar  **$cur7%** used (weekly)"
+        $color = 16766720   # gold
+    } else {
+        $title = "$cycleGlyph  WEEKLY LIMIT RESET"
+        $desc  = "$greenGlyph Your **weekly** window just rolled over -- back to **$cur7%**. Fresh window!`n`n$bar  **$cur7%** used (weekly)"
+        $color = 5763719
+    }
+    $f = @(); $r = Reset-In-Weekly $usage.seven_day.resets_at
+    if ($r) { $f += @{ name = 'Next weekly reset in'; value = $r; inline = $true } }
+    Send-Embed $title $desc $color $f $true
+}
 
-if ($isReset) {
-    $resetGlyph = [System.Char]::ConvertFromUtf32(0x1F504)   # cycle arrows
-    $which = @(); if ($reset5) { $which += '5h' }; if ($reset7) { $which += 'weekly' }
-    $title = "$resetGlyph  $(($which -join ' + ')) limit reset"
-    $color = 3066993   # green -- fresh window
-} else {
-    $title = "$chartGlyph  Usage update"
+# --- routine 1% crossing update (windows that climbed, not the ones reset) --
+if ((($crossed5 -and -not $reset5) -or ($crossed7 -and -not $reset7))) {
+    $desc  = "$(Usage-Bar $cur5)  $(Win-Line 'used (5h window)' $prev5 $cur5 $crossed5)"
+    $desc += "`n$(Usage-Bar $cur7)  $(Win-Line 'used (weekly)' $prev7 $cur7 $crossed7)"
+    $ping = ((($crossed5 -and -not $reset5) -and (Crossed-Milestone $prev5 $cur5)) -or `
+             (($crossed7 -and -not $reset7) -and (Crossed-Milestone $prev7 $cur7)))
     $color = if ($ping) {
         if ($cur5 -ge 100 -or $cur7 -ge 100) { 15158332 } else { 15844367 }  # red at limit, else amber
     } else { 3447003 }   # blurple for routine 1% updates
+    $f = @()
+    $r5 = Reset-In $usage.five_hour.resets_at
+    if ($r5) { $f += @{ name = '5h resets in'; value = $r5; inline = $true } }
+    $r7 = Reset-In-Weekly $usage.seven_day.resets_at
+    if ($r7) { $f += @{ name = 'Weekly resets in'; value = $r7; inline = $true } }
+    Send-Embed "$chartGlyph  Usage update" $desc $color $f $ping
 }
 
-$fields = @()
-$r5 = Reset-In $usage.five_hour.resets_at
-if ($r5) { $fields += @{ name = '5h resets in'; value = $r5; inline = $true } }
-$r7 = Reset-In-Weekly $usage.seven_day.resets_at
-if ($r7) { $fields += @{ name = 'Weekly resets in'; value = $r7; inline = $true } }
-
-$embed = @{
-    color       = $color
-    author      = @{ name = "$folderGlyph  $projectName" }
-    title       = $title
-    description = $desc
-    footer      = @{ text = "$((Get-Date).ToString('ddd MMM d, yyyy  h:mm tt'))" }
-    timestamp   = (Get-Date).ToUniversalTime().ToString('o')
-}
-if ($fields.Count -gt 0) { $embed['fields'] = $fields }
-
-$body = @{ embeds = @($embed) }
-if ($ping -and $UserId) {
-    $body['content'] = "<@$UserId>"
-    $body['allowed_mentions'] = @{ users = @("$UserId") }
-} else {
-    $body['allowed_mentions'] = @{ parse = @() }
-}
-
-try {
-    $json = $body | ConvertTo-Json -Compress -Depth 10
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-    Invoke-RestMethod -Uri $webhookUrl -Method Post -ContentType 'application/json; charset=utf-8' `
-        -Body $bytes -TimeoutSec 10 | Out-Null
-} catch { }
 exit 0
