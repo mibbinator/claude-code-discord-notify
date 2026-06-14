@@ -10,3 +10,5 @@ discord_activity_debug.jsonl
 discord_usage_cache.json
 settings.local.json
 *.local.json
+# Remote-control config: holds your Discord channel + user ID. Local only.
+.claude-remote.json
