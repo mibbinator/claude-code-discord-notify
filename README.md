@@ -4,7 +4,7 @@ Get **Discord notifications** from [Claude Code](https://claude.com/claude-code)
 
 - 🔔 **Ping feed** — pings you (real @-mention) **only when Claude actually needs your input** — a permission prompt, a question, an MCP elicitation, or Claude going idle/stuck and waiting for your reply (the ~60s idle signal). Gated on `notification_type`, so it skips routine turn-ends and informational notices. The embed shows your **official usage** (5-hour + weekly %, straight from the same endpoint `/usage` uses) and the token cost of the last prompt.
 - 📋 **Activity feed** — a separate, **no-ping** channel that streams what's happening: your prompts, subagents starting/finishing (task → model → tools used → result), `ultracode` workflow results, and Claude's messages — each tagged with the project directory, model, effort, and a timestamp.
-- 📊 **Usage tracker** — posts a compact embed **every time your official usage crosses a new whole percent** (5-hour and weekly windows), so you can watch the limit climb ~1% at a time. **Silent** for routine ticks; **@-mentions you** when a window crosses a milestone (25 / 50 / 80 / 90 / 100%). Runs on `PostToolUse` + `Stop`, but only actually posts on a real crossing (last-posted % is cached in `~/.claude/discord_usage_pct_state.json`).
+- 📊 **Usage tracker** — posts a compact embed **every time your official usage crosses a new whole percent** (5-hour and weekly windows), so you can watch the limit climb ~1% at a time. **Silent** for routine ticks; **@-mentions you** when a window crosses a milestone (25 / 50 / 80 / 90 / 100%) **and when a window resets** (a fresh 🔄 message + ping). Runs on `PostToolUse` + `Stop`, but only actually posts on a real crossing or reset (last-posted % is cached in `~/.claude/discord_usage_pct_state.json`).
 
 Two implementations with the same behavior:
 
@@ -93,7 +93,8 @@ This is an **undocumented internal endpoint** and may change between Claude Code
 
 The 📊 usage tracker fires on `PostToolUse` (every tool) and `Stop`, reads the same official usage endpoint as the ping feed, and posts **only when `floor(utilization)` increases** for the 5-hour or weekly window — i.e. roughly once per percent. Each post shows a progress bar + both percentages; when a single step jumps more than 1% it shows `old% → new%`.
 
-- **State:** the last posted whole-% for each window lives in `~/.claude/discord_usage_pct_state.json`. The first run just establishes a baseline (no post). A window dropping (a reset) silently re-baselines.
+- **State:** the last posted whole-% for each window lives in `~/.claude/discord_usage_pct_state.json`. The first run just establishes a baseline (no post).
+- **Resets:** when a window's usage drops below the stored value (the 5h or weekly limit rolled over), the tracker posts a green **🔄 limit reset** message and **@-mentions you** — so you know the moment a fresh window opens. The title names which window(s) reset (`5h`, `weekly`, or `5h + weekly`).
 - **Milestones:** crossing into **25 / 50 / 80 / 90 / 100%** on either window @-mentions you (via `-UserId`); the embed turns amber, or red at 100%. Every other crossing posts silently.
 - **Webhook:** read from `~/.claude/discord_usage_webhook.txt` (point it at the same channel as another feed if you like).
 - **Tuning milestones:** edit the `$Milestones` / `MILESTONES` list at the top of `notify-discord-usage.{ps1,sh}`. To make it silent-only, drop `-UserId` from both hook commands.

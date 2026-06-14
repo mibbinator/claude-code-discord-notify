@@ -118,9 +118,14 @@ if (Test-Path $stateFile) {
 # silently re-baselines. Persist the new floors regardless before deciding.
 $crossed5 = ($prev5 -ge 0 -and $cur5 -gt $prev5)
 $crossed7 = ($prev7 -ge 0 -and $cur7 -gt $prev7)
+# A window resetting shows up as utilization dropping below the stored value:
+# each window accumulates monotonically, then resets to ~0 at its boundary.
+$reset5 = ($prev5 -ge 0 -and $cur5 -lt $prev5)
+$reset7 = ($prev7 -ge 0 -and $cur7 -lt $prev7)
+$isReset = ($reset5 -or $reset7)
 $firstRun = ($prev5 -lt 0 -and $prev7 -lt 0)
 
-# Always store the current floors so we don't drift / re-post on resets.
+# Always store the current floors so we don't drift / re-post.
 try {
     $newState = @{ five_hour = $cur5; seven_day = $cur7 } | ConvertTo-Json -Compress
     Set-Content -Path $stateFile -Value $newState -NoNewline -Encoding ascii
@@ -129,10 +134,12 @@ try {
 # First ever run just establishes the baseline -- no post (avoids a spurious
 # embed at whatever % the tracker happens to be installed at).
 if ($firstRun) { exit 0 }
-if (-not $crossed5 -and -not $crossed7) { exit 0 }
+if (-not $isReset -and -not $crossed5 -and -not $crossed7) { exit 0 }
 
 # --- ping decision ----------------------------------------------------------
+# A limit reset always pings; a routine 1% crossing pings only at a milestone.
 $ping = $false
+if ($isReset) { $ping = $true }
 if ($crossed5 -and (Crossed-Milestone $prev5 $cur5)) { $ping = $true }
 if ($crossed7 -and (Crossed-Milestone $prev7 $cur7)) { $ping = $true }
 
@@ -149,9 +156,17 @@ function Win-Line([string]$label, [int]$old, [int]$new, [bool]$crossed) {
 $desc  = "$(Usage-Bar $cur5)  $(Win-Line 'used (5h window)' $prev5 $cur5 $crossed5)"
 $desc += "`n$(Usage-Bar $cur7)  $(Win-Line 'used (weekly)' $prev7 $cur7 $crossed7)"
 
-$color = if ($ping) {
-    if ($cur5 -ge 100 -or $cur7 -ge 100) { 15158332 } else { 15844367 }  # red at limit, else amber
-} else { 3447003 }   # blurple for routine 1% updates
+if ($isReset) {
+    $resetGlyph = [System.Char]::ConvertFromUtf32(0x1F504)   # cycle arrows
+    $which = @(); if ($reset5) { $which += '5h' }; if ($reset7) { $which += 'weekly' }
+    $title = "$resetGlyph  $(($which -join ' + ')) limit reset"
+    $color = 3066993   # green -- fresh window
+} else {
+    $title = "$chartGlyph  Usage update"
+    $color = if ($ping) {
+        if ($cur5 -ge 100 -or $cur7 -ge 100) { 15158332 } else { 15844367 }  # red at limit, else amber
+    } else { 3447003 }   # blurple for routine 1% updates
+}
 
 $fields = @()
 $r5 = Reset-In $usage.five_hour.resets_at
@@ -162,7 +177,7 @@ if ($r7) { $fields += @{ name = 'Weekly resets in'; value = $r7; inline = $true 
 $embed = @{
     color       = $color
     author      = @{ name = "$folderGlyph  $projectName" }
-    title       = "$chartGlyph  Usage update"
+    title       = $title
     description = $desc
     footer      = @{ text = "$((Get-Date).ToString('ddd MMM d, yyyy  h:mm tt'))" }
     timestamp   = (Get-Date).ToUniversalTime().ToString('o')

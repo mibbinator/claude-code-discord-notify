@@ -57,18 +57,24 @@ fi
 
 # Crossing = a window advanced to a higher whole percent. A drop (window reset)
 # silently re-baselines. Persist the new floors regardless before deciding.
-CROSSED5=0; CROSSED7=0; FIRSTRUN=0
+CROSSED5=0; CROSSED7=0; RESET5=0; RESET7=0; FIRSTRUN=0
 [ "$PREV5" -ge 0 ] 2>/dev/null && [ "$CUR5" -gt "$PREV5" ] 2>/dev/null && CROSSED5=1
 [ "$PREV7" -ge 0 ] 2>/dev/null && [ "$CUR7" -gt "$PREV7" ] 2>/dev/null && CROSSED7=1
+# A window resetting shows up as utilization dropping below the stored value:
+# each window accumulates monotonically, then resets to ~0 at its boundary.
+[ "$PREV5" -ge 0 ] 2>/dev/null && [ "$CUR5" -lt "$PREV5" ] 2>/dev/null && RESET5=1
+[ "$PREV7" -ge 0 ] 2>/dev/null && [ "$CUR7" -lt "$PREV7" ] 2>/dev/null && RESET7=1
+ISRESET=0; { [ "$RESET5" -eq 1 ] || [ "$RESET7" -eq 1 ]; } && ISRESET=1
 [ "$PREV5" -lt 0 ] 2>/dev/null && [ "$PREV7" -lt 0 ] 2>/dev/null && FIRSTRUN=1
 
 printf '{"five_hour":%s,"seven_day":%s}' "$CUR5" "$CUR7" > "$STATE_FILE" 2>/dev/null || true
 
 # First ever run just establishes the baseline -- no post.
 [ "$FIRSTRUN" -eq 1 ] && exit 0
-[ "$CROSSED5" -eq 0 ] && [ "$CROSSED7" -eq 0 ] && exit 0
+[ "$ISRESET" -eq 0 ] && [ "$CROSSED5" -eq 0 ] && [ "$CROSSED7" -eq 0 ] && exit 0
 
-# --- ping decision: did a crossing pass a milestone on either window? -------
+# --- ping decision ----------------------------------------------------------
+# A limit reset always pings; a routine 1% crossing pings only at a milestone.
 crossed_milestone() { # $1=old $2=new -> echoes 1 if any milestone in (old,new]
   local old="$1" new="$2" m
   for m in $MILESTONES; do
@@ -77,19 +83,29 @@ crossed_milestone() { # $1=old $2=new -> echoes 1 if any milestone in (old,new]
   echo 0
 }
 PING=0
+[ "$ISRESET" -eq 1 ] && PING=1
 [ "$CROSSED5" -eq 1 ] && [ "$(crossed_milestone "$PREV5" "$CUR5")" -eq 1 ] && PING=1
 [ "$CROSSED7" -eq 1 ] && [ "$(crossed_milestone "$PREV7" "$CUR7")" -eq 1 ] && PING=1
 
 # --- presentation ------------------------------------------------------------
-COLOR=3447003   # blurple for routine 1% updates
-if [ "$PING" -eq 1 ]; then
-  if [ "$CUR5" -ge 100 ] || [ "$CUR7" -ge 100 ]; then COLOR=15158332; else COLOR=15844367; fi
+if [ "$ISRESET" -eq 1 ]; then
+  which=""
+  [ "$RESET5" -eq 1 ] && which="5h"
+  [ "$RESET7" -eq 1 ] && { [ -n "$which" ] && which="$which + weekly" || which="weekly"; }
+  TITLE="🔄  $which limit reset"
+  COLOR=3066993   # green -- fresh window
+else
+  TITLE="📊  Usage update"
+  COLOR=3447003   # blurple for routine 1% updates
+  if [ "$PING" -eq 1 ]; then
+    if [ "$CUR5" -ge 100 ] || [ "$CUR7" -ge 100 ]; then COLOR=15158332; else COLOR=15844367; fi
+  fi
 fi
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 DATESTR="$(date +"%a %b %d, %Y  %I:%M %p")"
 
 BODY="$(jq -n \
-  --argjson color "$COLOR" --arg project "$PROJECT" --arg userId "$USER_ID" \
+  --argjson color "$COLOR" --arg project "$PROJECT" --arg userId "$USER_ID" --arg title "$TITLE" \
   --argjson usage "$USAGE_JSON" --arg datestr "$DATESTR" --arg ts "$TS" \
   --argjson prev5 "$PREV5" --argjson cur5 "$CUR5" --argjson crossed5 "$CROSSED5" \
   --argjson prev7 "$PREV7" --argjson cur7 "$CUR7" --argjson crossed7 "$CROSSED7" \
@@ -130,7 +146,7 @@ BODY="$(jq -n \
   | { embeds: [ {
         color: $color,
         author: { name: ("📁  " + $project) },
-        title: "📊  Usage update",
+        title: $title,
         description: $desc,
         fields: $fields,
         footer: { text: $datestr },
